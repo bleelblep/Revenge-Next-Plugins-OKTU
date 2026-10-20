@@ -1,50 +1,105 @@
 import React from 'react'
-import { Text, View } from 'react-native'
 import { getModules } from '@revenge-mod/modules/finders'
-import { executeClearAll } from '@revenge-mod/./ClearAll'  
+import { withProps } from '@revenge-mod/modules/finders/filters'
+import { after } from '@revenge-mod/patcher'
+import { executeClearAll } from './Clear'
+import Settings, { bindStorage, DEFAULT_DATA, getData } from './settings'
+import { ChatPill, patchChatAnchor } from './chatPill'
+import { patchServerMenu } from './serverMenu'
+import { addFloating, installFloatingRoot, onFloatingError, watchFloatingRoot } from './shared/floating/host'
 
-
-export function DrawerReadAllButton() {
-    return React.createElement(
-        View,
-        {
-            style: {
-                marginHorizontal: 12,
-                marginVertical: 8,
-                paddingVertical: 10,
-                paddingHorizontal: 14,
-                borderRadius: 8,
-                backgroundColor: 'rgba(255,255,255,0.08)',
-            },
-            onStartShouldSetResponder: () => true,
-            onResponderRelease: () => { void executeClearAll() },
-        },
-        React.createElement(
-            Text,
-            { style: { color: '#fff', fontWeight: '600', textAlign: 'center' } },
-            'Read All',
-        ),
-    )
+interface CommandOption {
+	name: string
+	description: string
+	type: number
+	required?: boolean
+	choices?: { name: string; value: string }[]
 }
 
-export function patchReadAllInDrawer(
-    cleanups: (() => void)[],
-    isDrawerContainer: (type: any, props: any) => boolean,
-): boolean {
-    const mods = getModules((m: any) => typeof m?.createElement === 'function')
-    const target = mods?.[0]
-    if (!target) return false
-
-    const orig = target.createElement
-    target.createElement = function (type: any, props: any, ...rest: any[]) {
-        const el = orig.call(this, type, props, ...rest)
-        if (!isDrawerContainer(type, props) || !React.isValidElement(el)) return el
-        const kids = (el.props as any)?.children
-        const arr = Array.isArray(kids) ? kids : kids ? [kids] : []
-        return React.cloneElement(el as any, {
-            children: [...arr, React.createElement(DrawerReadAllButton, { key: 'readall-drawer' })],
-        })
-    }
-    cleanups.push(() => { target.createElement = orig })
-    return true
+interface Command {
+	id?: string
+	name: string
+	description: string
+	options?: CommandOption[]
+	execute: (args: any[], ctx: any) => void | Promise<void>
 }
+
+function nextCommandId(res: any[]): string {
+	const used = new Set(res.map((c: any) => c?.id).filter(Boolean))
+	let n = 1
+	while (used.has(String(n))) n++
+	return String(n)
+}
+
+function buildCommand(): Command {
+	return {
+		name: 'readall',
+		description: 'Mark all servers and DMs as read',
+		async execute() {
+			await executeClearAll()
+		},
+	}
+}
+
+export default plugin({
+	jsonStorage: {
+		default: DEFAULT_DATA,
+		load: true,
+	},
+
+	preInit({ cleanup, plugin }) {
+		// The app's root wrapper is read once at startup, so the floating layer has to be set up
+		// before then. Enabled later, it waits for a reload.
+		if (!plugin.startedLate) watchFloatingRoot(cleanup)
+	},
+
+	init({ jsonStorage }) {
+		bindStorage(jsonStorage)
+	},
+
+	start({ cleanup, plugin }) {
+		let command: Command | undefined
+
+		// 1. Slash Command Patch
+		cleanup(
+			getModules(withProps('getBuiltInCommands'), store => {
+				cleanup(
+					after(store as any, 'getBuiltInCommands', (res: any) => {
+						if (!Array.isArray(res)) return res
+						const cmd = (command ??= buildCommand())
+						cmd.id ??= nextCommandId(res)
+						if (res.some((c: any) => c?.id === cmd.id)) return res
+						return [...res, cmd]
+					}),
+				)
+			}),
+		)
+
+		const report = (error: unknown) => plugin.reportError?.(error)
+
+		// 2. "Mark as read" in the server long-press menu (no reload needed)
+		cleanup(patchServerMenu(report))
+
+		// 3. "Mark read" pill above the message box, drawn on the app-wide floating layer
+		//    (shared/floating), which can only be added at startup.
+		cleanup(patchChatAnchor())
+		if (plugin.startedLate) {
+			plugin.requireReload()
+		} else {
+			try {
+				onFloatingError((context, error) => report(new Error(`${context}: ${(error as Error)?.message ?? error}`)))
+				cleanup(installFloatingRoot())
+				cleanup(addFloating('read-all-chat', () => (getData().chatPill ? React.createElement(ChatPill) : null)))
+			} catch (error) {
+				report(error)
+			}
+		}
+	},
+
+	stop({ plugin }) {
+		// The root wrapper only goes away cleanly on a reload.
+		plugin.requireReload()
+	},
+
+	SettingsComponent: Settings,
+})

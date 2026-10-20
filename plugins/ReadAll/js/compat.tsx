@@ -1,6 +1,7 @@
 import { lookupModule } from '@revenge-mod/modules/finders'
 import { withName, withProps } from '@revenge-mod/modules/finders/filters'
 import { Alert } from 'react-native'
+import { showToast as sharedToast } from './shared/toast'
 
 export const TAG = '[ReadAll+]'
 
@@ -35,13 +36,8 @@ export const findByStoreName = (name: string): any => {
  * Falls back to console.log if the Toast module cannot be found.
  */
 export function toast(message: string) {
-	try {
-		const t = findByProps('showToast')
-		if (t?.showToast) {
-			return void t.showToast({ content: message })
-		}
-	} catch {}
-	console.log(TAG, message)
+	// Through shared/toast.ts: calling showToast directly crashes Discord 350.4+.
+	sharedToast(message, 'ReadAllToast')
 }
 
 /**

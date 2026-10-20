@@ -1,20 +1,30 @@
 import React from 'react'
 import { Text, TouchableOpacity } from 'react-native'
 import { findByProps, findByStoreName, toast } from './compat'
+import { refreshFloating } from './shared/floating/host'
 
 export interface ReadAllData {
 	excludedServers: string[]
 	excludedDMs: string[]
-	pillBottom: number
-	pillRight: number
+	/** The "Mark read" pill above the message box while the open chat is unread. */
+	chatPill: boolean
+	side: 'left' | 'right'
+	/** A small round ✓ instead of the "Mark read" pill. */
+	compact: boolean
+	/** "Mark as read" in a server icon's long-press menu. */
+	serverMenu: boolean
 }
 
-const EMPTY: ReadAllData = { 
-	excludedServers: [], 
+const EMPTY: ReadAllData = {
+	excludedServers: [],
 	excludedDMs: [],
-	pillBottom: 60,
-	pillRight: 16
+	chatPill: true,
+	side: 'right',
+	compact: false,
+	serverMenu: true,
 }
+
+export const DEFAULT_DATA = EMPTY
 
 let storage:
 	| {
@@ -32,9 +42,18 @@ export function getData(): ReadAllData {
 	return {
 		excludedServers: Array.isArray(cache?.excludedServers) ? cache.excludedServers : EMPTY.excludedServers,
 		excludedDMs: Array.isArray(cache?.excludedDMs) ? cache.excludedDMs : EMPTY.excludedDMs,
-		pillBottom: typeof cache?.pillBottom === 'number' ? cache.pillBottom : EMPTY.pillBottom,
-		pillRight: typeof cache?.pillRight === 'number' ? cache.pillRight : EMPTY.pillRight,
+		chatPill: typeof cache?.chatPill === 'boolean' ? cache.chatPill : EMPTY.chatPill,
+		side: cache?.side === 'left' ? 'left' : 'right',
+		compact: typeof cache?.compact === 'boolean' ? cache.compact : EMPTY.compact,
+		serverMenu: typeof cache?.serverMenu === 'boolean' ? cache.serverMenu : EMPTY.serverMenu,
 	}
+}
+
+/** Saves a setting and redraws the pill with it. */
+export function setData(value: Partial<ReadAllData>) {
+	const done = storage?.set(value)
+	Promise.resolve(done).finally(refreshFloating)
+	refreshFloating()
 }
 
 export const isServerExcluded = (id: string) => getData().excludedServers.includes(id)
@@ -63,8 +82,8 @@ const dmName = (id: string) => {
 export default function Settings({ api }: { api: any }) {
 	const h = React.createElement
 	const { ScrollView } = findByProps('ScrollView')
-	const { TableRowGroup, TableRow, Stack, TextInput } = findByProps(
-		'TableRowGroup', 'TableRow', 'Stack', 'TextInput',
+	const { TableRowGroup, TableRow, TableSwitchRow, Stack, TextInput } = findByProps(
+		'TableRowGroup', 'TableRow', 'TableSwitchRow', 'Stack', 'TextInput',
 	)
 
 	const data: ReadAllData = { ...EMPTY, ...(api.jsonStorage.use() ?? getData()) }
@@ -114,23 +133,36 @@ export default function Settings({ api }: { api: any }) {
 	return h(ScrollView, { style: { flex: 1 }, contentContainerStyle: { padding: 10 } },
 		h(Stack, { spacing: 8 },
 			h(TableRowGroup, { title: 'Read All+ Info' },
-				h(TableRow, { label: 'What is this?', subLabel: 'Mark all unread servers and DMs as read with one command, excluding listed IDs' })
+				h(TableRow, { label: 'What is this?', subLabel: 'Mark a chat read from the pill above the message box, a server from its long-press menu, or everything with /readall (skips the IDs below)' })
 			),
 			
-			// --- NEW: Layout Settings ---
-			h(TableRowGroup, { title: 'Floating Pill Position' },
-				h(Stack, { spacing: 4 },
-					h(TextInput, { 
-						placeholder: 'Bottom Offset (e.g. 60)', 
-						value: String(data.pillBottom), 
-						onChange: (v: string) => void api.jsonStorage.set({ pillBottom: parseInt(v) || 0 }) 
-					}),
-					h(TextInput, { 
-						placeholder: 'Right Offset (e.g. 16)', 
-						value: String(data.pillRight), 
-						onChange: (v: string) => void api.jsonStorage.set({ pillRight: parseInt(v) || 0 }) 
-					})
-				)
+			h(TableRowGroup, { title: 'In chats' },
+				h(TableSwitchRow, {
+					label: '"Mark read" pill',
+					subLabel: 'Floats above the message box while the open DM or channel has unread messages. Turning it on needs a reload.',
+					value: data.chatPill,
+					onValueChange: (v: boolean) => setData({ chatPill: v }),
+				}),
+				h(TableSwitchRow, {
+					label: 'On the left',
+					subLabel: 'Off puts it on the right (Character Counter sits on the left by default)',
+					value: data.side === 'left',
+					onValueChange: (v: boolean) => setData({ side: v ? 'left' : 'right' }),
+				}),
+				h(TableSwitchRow, {
+					label: 'Compact',
+					subLabel: 'Just a round ✓',
+					value: data.compact,
+					onValueChange: (v: boolean) => setData({ compact: v }),
+				}),
+			),
+			h(TableRowGroup, { title: 'Servers' },
+				h(TableSwitchRow, {
+					label: 'Mark as read in the server menu',
+					subLabel: 'Long-press a server icon to mark just that server read',
+					value: data.serverMenu,
+					onValueChange: (v: boolean) => setData({ serverMenu: v }),
+				}),
 			),
 
 			...section('excludedServers', 'Exclude Server', 'Excluded Servers', 'Enter Server ID', 'Add Server Exception', 'Prevent this server from being marked as read', serverInput, setServerInput, serverName),

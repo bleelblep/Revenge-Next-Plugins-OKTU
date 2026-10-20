@@ -1,4 +1,5 @@
-import { findByProps, findByStoreName } from './compat'
+import * as flux from '@revenge-mod/discord/common/flux'
+import { Stores } from '@revenge-mod/discord/flux'
 import { getData } from './settings'
 
 export interface ClearAllResult {
@@ -13,104 +14,121 @@ function toArray<T = any>(value: unknown): T[] {
 	return Array.isArray(value) ? value : (Object.values(value) as T[])
 }
 
+function guildIdsOf(GuildStore: any): string[] {
+	return toArray<any>(GuildStore?.getGuildIds?.() ?? Object.keys(GuildStore?.getGuilds?.() ?? {}))
+}
+
 /**
- * Marks every unread DM and every unread channel in non-excluded servers as read.
- * Respects the excludedServers and excludedDMs from the Settings menu.
+ * Whether there's anything for the button to do: an unread DM, or a server Discord shows as
+ * unread (GuildReadStateStore already leaves out muted servers and channels). Cheap enough to
+ * run on every read-state change, unlike walking every channel.
  */
-export async function executeClearAll(): Promise<ClearAllResult> {
+export function hasAnythingUnread(): boolean {
+	try {
+		const { excludedServers, excludedDMs } = getData()
+		const { ReadStateStore, GuildReadStateStore, ChannelStore, GuildStore } = Stores as any
+		for (const id of toArray<string>(ChannelStore?.getPrivateChannelIds?.())) {
+			if (!excludedDMs.includes(id) && ReadStateStore?.hasUnread?.(id)) return true
+		}
+		for (const id of guildIdsOf(GuildStore)) {
+			if (!excludedServers.includes(id) && GuildReadStateStore?.hasUnread?.(id)) return true
+		}
+	} catch {
+		return true
+	}
+	return false
+}
+
+/** How many channels go in one BULK_ACK (the ack-bulk endpoint takes 100 at a time). */
+const CHUNK = 100
+
+/**
+ * Marks every unread DM and every unread channel (and joined thread) in non-excluded servers as
+ * read, in one go, the way Discord's own "Mark as read" does: a `BULK_ACK` Flux action with
+ * `{ channelId, messageId, readStateType: 0 }` per channel, which ReadStateStore applies locally
+ * and sends to `/read-states/ack-bulk`. Same as `ReadStateActionCreators.bulkAck` on 351.3.
+ *
+ * Stores come from Revenge's `Stores` proxy: `withName('ReadStateStore')` matches nothing (a store
+ * is an instance, not a named function), which is why the old version always found "nothing".
+ */
+export type ClearKind = 'all' | 'servers' | 'dms'
+
+export async function executeClearAll(kind: ClearKind = 'all', onlyGuild?: string): Promise<ClearAllResult> {
 	const { excludedServers, excludedDMs } = getData()
 	const excludedS = new Set(excludedServers)
 	const excludedD = new Set(excludedDMs)
-
 	const result: ClearAllResult = { dms: 0, channels: 0, skipped: 0 }
 
-	// 1. Locate the ReadStateStore + the acknowledgment function
-	const ReadStateStore = findByStoreName('ReadStateStore')
-	const ack =
-		ReadStateStore?.ack ??
-		ReadStateStore?.ackChannel ??
-		findByProps('ack')?.ack
+	const { ReadStateStore, ChannelStore, GuildStore, GuildChannelStore, ActiveJoinedThreadsStore } = Stores as any
+	const dispatcher = (flux as any).Dispatcher
+	if (!ReadStateStore || typeof dispatcher?.dispatch !== 'function') throw new Error('ReadStateStore or the dispatcher is missing')
 
-	if (typeof ack !== 'function') {
-		console.error('[ReadAll] ack function not found in this build')
-		return result
+	const acks: { channelId: string; messageId: string | null; readStateType: number }[] = []
+	const seen = new Set<string>()
+	const add = (id: string | undefined, bucket: 'dms' | 'channels') => {
+		if (!id || seen.has(id)) return
+		seen.add(id)
+		if (!ReadStateStore.hasUnread?.(id)) return
+		acks.push({ channelId: id, messageId: ReadStateStore.lastMessageId?.(id) ?? null, readStateType: 0 })
+		result[bucket]++
 	}
 
-	// Only touch channels that are actually unread (when the store can tell us).
-	const isUnread = (id: string): boolean =>
-		typeof ReadStateStore?.hasUnread === 'function'
-			? Boolean(ReadStateStore.hasUnread(id))
-			: true
-
-	const markRead = async (id: string): Promise<boolean> => {
-		try {
-			await ack.call(ReadStateStore, id)
-			return true
-		} catch {
-			result.skipped++
-			return false
-		}
+	// DMs and group DMs
+	const dmIds: string[] = kind === 'servers' || onlyGuild ? [] : toArray<string>(ChannelStore?.getPrivateChannelIds?.())
+	for (const id of dmIds) {
+		if (excludedD.has(id)) result.skipped++
+		else add(id, 'dms')
 	}
 
-	// 2. DMs & Group DMs
-	// getPrivateChannels() returns an id -> channel map, NOT an array, so it
-	// must be converted before iterating (iterating the map directly throws).
-	const PrivateChannelStore = findByStoreName('PrivateChannelStore')
-	const privateChannels = toArray<any>(PrivateChannelStore?.getPrivateChannels?.())
-
-	for (const ch of privateChannels) {
-		const id: string | undefined = ch?.channelId ?? ch?.id
-		if (!id) continue
-
-		if (excludedD.has(id)) {
+	// Server channels and the threads you're in
+	const guildIds: string[] = onlyGuild ? [onlyGuild] : kind === 'dms' ? [] : guildIdsOf(GuildStore)
+	for (const guildId of guildIds) {
+		if (!onlyGuild && excludedS.has(guildId)) {
 			result.skipped++
 			continue
 		}
-		if (!isUnread(id)) continue
-
-		if (await markRead(id)) result.dms++
-	}
-
-	// 3. Server channels
-	// GuildStore guild objects don't carry their channels; ask GuildChannelStore.
-	const GuildStore = findByStoreName('GuildStore')
-	const GuildChannelStore = findByStoreName('GuildChannelStore')
-	const guilds = toArray<any>(GuildStore?.getGuilds?.())
-
-	const getGuildChannelIds = (guild: any): string[] => {
-		const grouped = GuildChannelStore?.getChannels?.(guild.id)
-		if (grouped) {
-			const ids: string[] = []
-			for (const key of ['SELECTABLE', 'VOCAL']) {
-				for (const entry of toArray<any>(grouped[key])) {
-					const id = entry?.channel?.id ?? entry?.id
-					if (id) ids.push(id)
-				}
-			}
-			return ids
+		const grouped = GuildChannelStore?.getChannels?.(guildId)
+		for (const key of ['SELECTABLE', 'VOCAL']) {
+			for (const entry of toArray<any>(grouped?.[key])) add(entry?.channel?.id ?? entry?.id, 'channels')
 		}
-		return Object.keys(guild?.channels ?? {})
-	}
-
-	for (const guild of guilds) {
-		const guildId: string | undefined = guild?.id
-		if (!guildId) continue
-
-		if (excludedS.has(guildId)) {
-			result.skipped++
-			continue
-		}
-
-		for (const chId of getGuildChannelIds(guild)) {
-			if (!isUnread(chId)) continue
-			if (await markRead(chId)) result.channels++
+		const threads = ActiveJoinedThreadsStore?.getActiveJoinedThreadsForGuild?.(guildId) ?? {}
+		for (const byParent of toArray<any>(threads)) {
+			for (const thread of toArray<any>(byParent)) add(thread?.channel?.id ?? thread?.id, 'channels')
 		}
 	}
 
-	console.log(
-		`[ReadAll] Finished! Cleared ${result.dms} DMs, ${result.channels} channels. Skipped ${result.skipped}.`,
-	)
+	for (let i = 0; i < acks.length; i += CHUNK) {
+		dispatcher.dispatch({ type: 'BULK_ACK', context: 'APP', channels: acks.slice(i, i + CHUNK) })
+	}
+
+	console.log(`[ReadAll] Cleared ${result.dms} DMs, ${result.channels} channels. Skipped ${result.skipped}.`)
 	return result
+}
+
+/** One server (from its long-press menu). Exclusions don't apply: you picked this one. */
+export function executeClearGuild(guildId: string): Promise<ClearAllResult> {
+	return executeClearAll('servers', guildId)
+}
+
+export function hasUnreadChannel(channelId: string): boolean {
+	try {
+		return !!(Stores as any).ReadStateStore?.hasUnread?.(channelId)
+	} catch {
+		return false
+	}
+}
+
+/** One chat (the pill above the message box). Returns false when Discord couldn't be reached. */
+export function markChannelRead(channelId: string): boolean {
+	const { ReadStateStore } = Stores as any
+	const dispatcher = (flux as any).Dispatcher
+	if (!ReadStateStore || typeof dispatcher?.dispatch !== 'function') return false
+	dispatcher.dispatch({
+		type: 'BULK_ACK',
+		context: 'APP',
+		channels: [{ channelId, messageId: ReadStateStore.lastMessageId?.(channelId) ?? null, readStateType: 0 }],
+	})
+	return true
 }
 
 /**
