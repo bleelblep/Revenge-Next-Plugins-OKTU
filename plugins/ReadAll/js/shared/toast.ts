@@ -21,10 +21,12 @@ import { ToastActionCreators } from '@revenge-mod/discord/actions'
  *
  * ## How this picks one
  *
- * `openMana` present means 350.2–350.3: use it. Otherwise call `open(legacy, mana)`: 350.4+ reads
- * only the second argument as the toast (the first is compared by identity for its dedupe, so an
- * object there just never dedupes), and pre-350.2 builds read only the first. This avoids sniffing
- * `open.length`, which a patched or wrapped `open` would report as 0.
+ * `openMana` present means 350.2–350.3: use it. Otherwise call `open(key, mana)` with the plain
+ * string key. Until 351.x `open(legacy, mana)` also worked (350.4 compared the first argument by
+ * identity only), but on 351.6 an object key makes the toast silently not show (verified live
+ * 2026-10-21: `open({ key, content }, mana)` showed nothing, `open(key, mana)` showed). Pre-350.2
+ * builds, which read only a one-object first argument, are no longer supported. This avoids
+ * sniffing `open.length`, which a patched or wrapped `open` would report as 0.
  *
  * See `docs/debugging/discord-toast-system.md` for the bundle trace. `revenge.*` is only read
  * inside the function (docs/porting-rules.md rule 1).
@@ -38,7 +40,7 @@ export function showToast(content: string, key = 'SharedToast') {
 			creators.openMana(key, mana)
 			return
 		}
-		creators.open({ key, content }, mana)
+		creators.open(key, mana)
 	} catch {
 		/* a missing toast must never take the app down */
 	}

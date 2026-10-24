@@ -1,12 +1,11 @@
-import React from 'react'
 import { getModules } from '@revenge-mod/modules/finders'
 import { withProps } from '@revenge-mod/modules/finders/filters'
 import { after } from '@revenge-mod/patcher'
 import { executeClearAll } from './Clear'
-import Settings, { bindStorage, DEFAULT_DATA, getData } from './settings'
-import { ChatPill, patchChatAnchor } from './chatPill'
-import { patchServerMenu } from './serverMenu'
-import { addFloating, installFloatingRoot, onFloatingError, watchFloatingRoot } from './shared/floating/host'
+import Settings, { bindStorage, DEFAULT_DATA } from './settings'
+import { patchChatPill } from './chatPill'
+import { patchHoldAck } from './lib/holdAck'
+import { patchJumpToPresent } from './lib/jumpToPresent'
 
 interface CommandOption {
 	name: string
@@ -34,9 +33,9 @@ function nextCommandId(res: any[]): string {
 function buildCommand(): Command {
 	return {
 		name: 'readall',
-		description: 'Mark all servers and DMs as read',
+		description: 'Mark all DMs and group DMs as read',
 		async execute() {
-			await executeClearAll()
+			await executeClearAll('dms')
 		},
 	}
 }
@@ -47,17 +46,11 @@ export default plugin({
 		load: true,
 	},
 
-	preInit({ cleanup, plugin }) {
-		// The app's root wrapper is read once at startup, so the floating layer has to be set up
-		// before then. Enabled later, it waits for a reload.
-		if (!plugin.startedLate) watchFloatingRoot(cleanup)
-	},
-
 	init({ jsonStorage }) {
 		bindStorage(jsonStorage)
 	},
 
-	start({ cleanup, plugin }) {
+	start({ cleanup }) {
 		let command: Command | undefined
 
 		// 1. Slash Command Patch
@@ -75,30 +68,13 @@ export default plugin({
 			}),
 		)
 
-		const report = (error: unknown) => plugin.reportError?.(error)
+		// 2. "Mark read" button above the message box, drawn by the chat input itself
+		cleanup(patchChatPill())
+		// ...kept clear of Discord's Jump To Present button (and JumpToTop's copy on it)
+		cleanup(patchJumpToPresent())
 
-		// 2. "Mark as read" in the server long-press menu (no reload needed)
-		cleanup(patchServerMenu(report))
-
-		// 3. "Mark read" pill above the message box, drawn on the app-wide floating layer
-		//    (shared/floating), which can only be added at startup.
-		cleanup(patchChatAnchor())
-		if (plugin.startedLate) {
-			plugin.requireReload()
-		} else {
-			try {
-				onFloatingError((context, error) => report(new Error(`${context}: ${(error as Error)?.message ?? error}`)))
-				cleanup(installFloatingRoot())
-				cleanup(addFloating('read-all-chat', () => (getData().chatPill ? React.createElement(ChatPill) : null)))
-			} catch (error) {
-				report(error)
-			}
-		}
-	},
-
-	stop({ plugin }) {
-		// The root wrapper only goes away cleanly on a reload.
-		plugin.requireReload()
+		// 3. Optionally, Discord stops marking chats read by itself (setting read per call)
+		cleanup(patchHoldAck())
 	},
 
 	SettingsComponent: Settings,

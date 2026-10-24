@@ -110,6 +110,33 @@ export function executeClearGuild(guildId: string): Promise<ClearAllResult> {
 	return executeClearAll('servers', guildId)
 }
 
+/** Whether a chat is a DM or group DM (channel types 1 and 3), the only chats the button shows in. */
+export function isPrivateChannel(channelId: string): boolean {
+	try {
+		const { ChannelStore } = Stores as any
+		// Server channels and their threads carry a guild id; DMs never do.
+		const channel = ChannelStore?.getChannel?.(channelId)
+		if (!channel || channel.guild_id || channel.guildId) return false
+		if (channel.type === 1 || channel.type === 3) return true
+		return toArray<string>(ChannelStore?.getPrivateChannelIds?.()).includes(channelId)
+	} catch {
+		return false
+	}
+}
+
+/** Unread DMs and group DMs the "all DMs" hold would mark, leaving out excluded ones. */
+export function unreadDMCount(): number {
+	try {
+		const { excludedDMs } = getData()
+		const { ReadStateStore, ChannelStore } = Stores as any
+		return toArray<string>(ChannelStore?.getPrivateChannelIds?.()).filter(
+			id => !excludedDMs.includes(id) && ReadStateStore?.hasUnread?.(id),
+		).length
+	} catch {
+		return 0
+	}
+}
+
 export function hasUnreadChannel(channelId: string): boolean {
 	try {
 		return !!(Stores as any).ReadStateStore?.hasUnread?.(channelId)

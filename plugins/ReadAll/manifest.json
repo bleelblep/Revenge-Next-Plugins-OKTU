@@ -2,9 +2,9 @@
   "format": 1,
   "id": "com.otkusteyler.readallplus",
   "name": "Read All+",
-  "description": "Mark a chat read from a pill above the message box, or a whole server from its menu.",
+  "description": "Mark a DM read from a button above the message box, or hold it to mark every DM read.",
   "author": "OTKUSteyler & VMUser8.1",
-  "version": "1.3.1",
+  "version": "1.6.1",
   "dependencies": {
     "revenge.api": {
       "version": ">=1 <2"
